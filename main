@@ -1,0 +1,496 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+
+local player = Players.LocalPlayer
+local performAction = ReplicatedStorage
+    :WaitForChild("Remotes")
+    :WaitForChild("PerformAction")
+
+local items = {
+    "PolisherSpeed",
+    "PolishLuck",
+    "DrierSpeed",
+    "MolderSpeed",
+    "MoldLuck",
+    "DiggerSpeed",
+    "ShovelLuck",
+    "GeneratorUptime",
+}
+
+local SETTINGS_FILE = "SellDirtSbs.txt"
+
+-- Remove the previous copy, if present.
+local env = getgenv and getgenv() or _G
+local previous = env.PurchaseToggleState
+
+if previous then
+    previous.enabled = false
+    previous.runId = (previous.runId or 0) + 1
+    previous.statsRunId = (previous.statsRunId or 0) + 1
+
+    if previous.statsGui then
+        pcall(function()
+            previous.statsGui:Destroy()
+        end)
+    end
+
+    if previous.statsDragConnection then
+        pcall(function()
+            previous.statsDragConnection:Disconnect()
+        end)
+    end
+
+    if previous.statsDragEndConnection then
+        pcall(function()
+            previous.statsDragEndConnection:Disconnect()
+        end)
+    end
+
+    if previous.window then
+        pcall(function()
+            previous.window:Unload()
+        end)
+    end
+end
+
+local settings = {
+    autoPurchase = true,
+    showStats = true,
+    dragStats = false,
+    textSize = 48,
+    boldText = true,
+    plotNumber = 8,
+    showExtractorNumber = false,
+    statsPosition = {
+        xOffset = -112,
+        xScale = 0.5,
+        yScale = 0.5,
+        yOffset = -470,
+    },
+}
+
+-- Load saved settings when executor file functions are available.
+pcall(function()
+    if isfile(SETTINGS_FILE) then
+        local saved = HttpService:JSONDecode(readfile(SETTINGS_FILE))
+
+        if type(saved.autoPurchase) == "boolean" then
+            settings.autoPurchase = saved.autoPurchase
+        end
+        if type(saved.showStats) == "boolean" then
+            settings.showStats = saved.showStats
+        end
+        if type(saved.dragStats) == "boolean" then
+            settings.dragStats = saved.dragStats
+        end
+        if type(saved.boldText) == "boolean" then
+            settings.boldText = saved.boldText
+        end
+        if type(saved.showExtractorNumber) == "boolean" then
+            settings.showExtractorNumber = saved.showExtractorNumber
+        end
+        if type(saved.textSize) == "number" then
+            settings.textSize = math.clamp(math.floor(saved.textSize), 8, 48)
+        end
+        if type(saved.plotNumber) == "number" then
+            settings.plotNumber = math.clamp(math.floor(saved.plotNumber), 1, 8)
+        end
+
+        if type(saved.statsPosition) == "table" then
+            local position = saved.statsPosition
+
+            if type(position.xScale) == "number" then
+                settings.statsPosition.xScale = position.xScale
+            end
+            if type(position.xOffset) == "number" then
+                settings.statsPosition.xOffset = position.xOffset
+            end
+            if type(position.yScale) == "number" then
+                settings.statsPosition.yScale = position.yScale
+            end
+            if type(position.yOffset) == "number" then
+                settings.statsPosition.yOffset = position.yOffset
+            end
+        end
+    end
+end)
+
+local state = {
+    enabled = false,
+    runId = 0,
+    statsGui = nil,
+    statsRunId = 0,
+    statsDragConnection = nil,
+    statsDragEndConnection = nil,
+    statsDragFrame = nil,
+    statsLabels = nil,
+    window = nil,
+}
+env.PurchaseToggleState = state
+
+local function saveSettings()
+    pcall(function()
+        writefile(SETTINGS_FILE, HttpService:JSONEncode(settings))
+    end)
+end
+
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+
+local window = Rayfield:CreateWindow({
+    name = "Purchase Toggle",
+    subtitle = "Purchases and extractor stats",
+    sidebarLayout = true,
+})
+
+state.window = window
+
+local mainTab = window:CreateTab({
+    name = "Main",
+    icon = nil,
+})
+
+local statsTab = window:CreateTab({
+    name = "Stats",
+    icon = nil,
+})
+
+local function setPurchaseEnabled(on, save)
+    state.enabled = on
+    state.runId += 1
+    local thisRun = state.runId
+
+    settings.autoPurchase = on
+    if save ~= false then
+        saveSettings()
+    end
+
+    if not on then
+        return
+    end
+
+    task.spawn(function()
+        while state.enabled and state.runId == thisRun do
+            for _, itemName in ipairs(items) do
+                if not state.enabled or state.runId ~= thisRun then
+                    break
+                end
+
+                performAction:FireServer("Buy", nil, itemName)
+                task.wait(0.15)
+            end
+        end
+    end)
+end
+
+local function getTextFromObject(object)
+    if not object then
+        return "Text object not found"
+    end
+
+    local ok, text = pcall(function()
+        return object.Text
+    end)
+
+    if ok and text ~= nil then
+        return tostring(text)
+    end
+
+    for _, descendant in ipairs(object:GetDescendants()) do
+        local descendantOk, descendantText = pcall(function()
+            return descendant.Text
+        end)
+
+        if descendantOk and descendantText ~= nil then
+            return tostring(descendantText)
+        end
+    end
+
+    return object.Name
+end
+
+local function getExtractorText(extractorName)
+    local ok, result = pcall(function()
+        local plots = workspace:FindFirstChild("Plots")
+        local plot = plots and plots:FindFirstChild("Plot" .. settings.plotNumber)
+        local extractor = plot and plot:FindFirstChild(extractorName)
+        local ball = extractor and extractor:FindFirstChild("ExtractorBall")
+        local billboard = ball and ball:FindFirstChild("BillboardGui")
+        local children = billboard and billboard:GetChildren()
+
+        return getTextFromObject(children and children[3])
+    end)
+
+    if ok then
+        return result
+    end
+
+    return "Unavailable"
+end
+
+local function applyTextStyle()
+    if not state.statsLabels then
+        return
+    end
+
+    local font = settings.boldText and Enum.Font.GothamBold or Enum.Font.Gotham
+
+    for _, label in ipairs(state.statsLabels) do
+        if label and label.Parent then
+            label.TextSize = settings.textSize
+            label.Font = font
+        end
+    end
+end
+
+local function saveCurrentStatsPosition()
+    local frame = state.statsDragFrame
+    if not frame then
+        return
+    end
+
+    local position = frame.Position
+    settings.statsPosition = {
+        xScale = position.X.Scale,
+        xOffset = position.X.Offset,
+        yScale = position.Y.Scale,
+        yOffset = position.Y.Offset,
+    }
+
+    saveSettings()
+end
+
+local function setStatsVisible(show, save)
+    state.statsRunId += 1
+    local thisRun = state.statsRunId
+
+    settings.showStats = show
+    if save ~= false then
+        saveSettings()
+    end
+
+    if state.statsGui then
+        state.statsGui:Destroy()
+        state.statsGui = nil
+    end
+
+    if state.statsDragConnection then
+        state.statsDragConnection:Disconnect()
+        state.statsDragConnection = nil
+    end
+
+    if state.statsDragEndConnection then
+        state.statsDragEndConnection:Disconnect()
+        state.statsDragEndConnection = nil
+    end
+
+    state.statsDragFrame = nil
+    state.statsLabels = nil
+
+    if not show then
+        return
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ExtractorStatsDisplay"
+    gui.ResetOnSpawn = false
+    gui.Parent = player:WaitForChild("PlayerGui")
+    state.statsGui = gui
+
+    local textContainer = Instance.new("Frame")
+    textContainer.Name = "StatsText"
+    textContainer.Size = UDim2.fromOffset(320, 80)
+    textContainer.Position = UDim2.new(
+        settings.statsPosition.xScale,
+        settings.statsPosition.xOffset,
+        settings.statsPosition.yScale,
+        settings.statsPosition.yOffset
+    )
+    textContainer.BackgroundTransparency = 1
+    textContainer.Active = settings.dragStats
+    textContainer.Parent = gui
+    state.statsDragFrame = textContainer
+
+    local function createLabel(yPosition)
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.new(1, 0, 0, 36)
+        label.Position = UDim2.fromOffset(0, yPosition)
+        label.BackgroundTransparency = 1
+        label.TextColor3 = Color3.new(1, 1, 1)
+        label.TextStrokeTransparency = 0.35
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.TextWrapped = true
+        label.Active = false
+        label.Selectable = false
+        label.Text = "Loading..."
+        label.Parent = textContainer
+        return label
+    end
+
+    local extractor1Label = createLabel(0)
+    local extractor2Label = createLabel(40)
+
+    state.statsLabels = {
+        extractor1Label,
+        extractor2Label,
+    }
+    applyTextStyle()
+
+    local dragging = false
+    local dragStart
+    local startPosition
+
+    textContainer.InputBegan:Connect(function(input)
+        if not settings.dragStats then
+            return
+        end
+
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPosition = textContainer.Position
+        end
+    end)
+
+    state.statsDragConnection = UserInputService.InputChanged:Connect(function(input)
+        if dragging
+            and (input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            textContainer.Position = UDim2.new(
+                startPosition.X.Scale,
+                startPosition.X.Offset + delta.X,
+                startPosition.Y.Scale,
+                startPosition.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    state.statsDragEndConnection = UserInputService.InputEnded:Connect(function(input)
+        if dragging
+            and (input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            saveCurrentStatsPosition()
+        end
+    end)
+
+    task.spawn(function()
+        while state.statsGui == gui
+            and state.statsRunId == thisRun
+            and gui.Parent do
+            local extractor1Text = getExtractorText("Extractor")
+            local extractor2Text = getExtractorText("Extractor2")
+
+            if settings.showExtractorNumber then
+                extractor1Label.Text = "Extractor 1: " .. extractor1Text
+                extractor2Label.Text = "Extractor 2: " .. extractor2Text
+            else
+                extractor1Label.Text = extractor1Text
+                extractor2Label.Text = extractor2Text
+            end
+
+            task.wait(0.1)
+        end
+    end)
+end
+
+local function setStatsDragging(enabled)
+    settings.dragStats = enabled
+
+    if state.statsDragFrame then
+        state.statsDragFrame.Active = enabled
+    end
+
+    if not enabled then
+        saveCurrentStatsPosition()
+    else
+        saveSettings()
+    end
+end
+
+local function setTextSize(input)
+    local size = tonumber(input)
+    if not size then
+        return
+    end
+
+    settings.textSize = math.clamp(math.floor(size), 8, 48)
+    applyTextStyle()
+    saveSettings()
+end
+
+local function setBoldText(enabled)
+    settings.boldText = enabled
+    applyTextStyle()
+    saveSettings()
+end
+
+local function setPlotNumber(input)
+    local plotNumber = tonumber(input)
+    if not plotNumber then
+        return
+    end
+
+    settings.plotNumber = math.clamp(math.floor(plotNumber), 1, 8)
+    saveSettings()
+end
+
+local function setShowExtractorNumber(enabled)
+    settings.showExtractorNumber = enabled
+    saveSettings()
+end
+
+mainTab:CreateToggle({
+    name = "Auto Buy",
+    value = settings.autoPurchase,
+    callback = function(value)
+        setPurchaseEnabled(value)
+    end,
+})
+
+statsTab:CreateToggle({
+    name = "Show Extractor Stats",
+    value = settings.showStats,
+    callback = function(value)
+        setStatsVisible(value)
+    end,
+})
+
+statsTab:CreateToggle({
+    name = "Drag Stats Text",
+    value = settings.dragStats,
+    callback = setStatsDragging,
+})
+
+statsTab:CreateInput({
+    name = "Plot Number",
+    placeholder = "Enter a plot number from 1 to 8",
+    value = tostring(settings.plotNumber),
+    callback = setPlotNumber,
+})
+
+statsTab:CreateInput({
+    name = "Text Size",
+    placeholder = "Enter a size from 8 to 48",
+    value = tostring(settings.textSize),
+    callback = setTextSize,
+})
+
+statsTab:CreateToggle({
+    name = "Bold Text",
+    value = settings.boldText,
+    callback = setBoldText,
+})
+
+statsTab:CreateToggle({
+    name = "Show Extractor Number Text",
+    value = settings.showExtractorNumber,
+    callback = setShowExtractorNumber,
+})
+
+-- Apply saved values in case Rayfield doesn't call callbacks on creation.
+setPurchaseEnabled(settings.autoPurchase, false)
+setStatsVisible(settings.showStats, false)
